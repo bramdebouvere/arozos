@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/robertkrimen/otto"
@@ -236,8 +237,47 @@ func (g *Gateway) injectStandardLibs(vm *otto.Otto, scriptFile string, scriptSco
 			reply, _ := vm.ToValue(false)
 			return reply
 		}
+
+		//Parse the module config JSON to convert relative paths to absolute paths
+		var moduleConfig map[string]interface{}
+		err = json.Unmarshal([]byte(jsonModuleConfig), &moduleConfig)
+		if err != nil {
+			g.RaiseError(err)
+			reply, _ := vm.ToValue(false)
+			return reply
+		}
+
+		//Get the module directory from the script file path
+		//For example: ./web/Label Maker/init.agi -> Label Maker
+		if scriptFile != "" && scriptScope != "" {
+			moduleDir := static.GetScriptRoot(scriptFile, scriptScope)
+
+			//Convert relative paths to absolute paths for IconPath, StartDir, and LaunchFWDir
+			pathFields := []string{"IconPath", "StartDir", "LaunchFWDir", "LaunchEmb"}
+			for _, field := range pathFields {
+				if value, exists := moduleConfig[field]; exists {
+					if strValue, ok := value.(string); ok && strValue != "" {
+						//Check if the path is relative (doesn't start with module name)
+						if !filepath.IsAbs(strValue) && !strings.HasPrefix(strValue, moduleDir+"/") {
+							//Convert relative path to absolute path
+							moduleConfig[field] = filepath.ToSlash(filepath.Join(moduleDir, strValue))
+						}
+					}
+				}
+			}
+
+			//Re-encode the modified config
+			modifiedJSON, err := json.Marshal(moduleConfig)
+			if err != nil {
+				g.RaiseError(err)
+				reply, _ := vm.ToValue(false)
+				return reply
+			}
+			jsonModuleConfig = string(modifiedJSON)
+		}
+
 		//Try to decode it to a module Info
-		g.Option.ModuleRegisterParser(jsonModuleConfig)
+		err = g.Option.ModuleRegisterParser(jsonModuleConfig)
 		if err != nil {
 			g.RaiseError(err)
 			reply, _ := vm.ToValue(false)
@@ -252,104 +292,12 @@ func (g *Gateway) injectStandardLibs(vm *otto.Otto, scriptFile string, scriptSco
 		vm.Set("requirepkg", func(call otto.FunctionCall) otto.Value {
 			g.RaiseError(errors.New("requirepkg has been deprecated in agi v3.0"))
 			return otto.FalseValue()
-			/*
-				packageName, err := call.Argument(0).ToString()
-				if err != nil {
-					g.RaiseError(err)
-					return otto.FalseValue()
-				}
-				requireComply, err := call.Argument(1).ToBoolean()
-				if err != nil {
-					g.RaiseError(err)
-					return otto.FalseValue()
-				}
-
-				scriptRoot := static.GetScriptRoot(scriptFile, scriptScope)
-
-				//Check if this module already get registered.
-				alreadyRegistered := false
-				for _, pkgRequest := range g.AllowAccessPkgs[strings.ToLower(packageName)] {
-					if pkgRequest.InitRoot == scriptRoot {
-						alreadyRegistered = true
-						break
-					}
-				}
-
-				if !alreadyRegistered {
-					//Register this packge to this script and allow the module to call this package
-					g.AllowAccessPkgs[strings.ToLower(packageName)] = append(g.AllowAccessPkgs[strings.ToLower(packageName)], AgiPackage{
-						InitRoot: scriptRoot,
-					})
-				}
-
-				//Try to install the package via apt
-				err = g.Option.PackageManager.InstallIfNotExists(packageName, requireComply)
-				if err != nil {
-					g.RaiseError(err)
-					return otto.FalseValue()
-				}
-
-				return otto.TrueValue()
-			*/
 		})
 
 		//Exec required pkg with permission control
 		vm.Set("execpkg", func(call otto.FunctionCall) otto.Value {
 			g.RaiseError(errors.New("execpkg has been deprecated in agi v3.0"))
 			return otto.FalseValue()
-			/*
-				//Check if the pkg is already registered
-				scriptRoot := static.GetScriptRoot(scriptFile, scriptScope)
-				packageName, err := call.Argument(0).ToString()
-				if err != nil {
-					g.RaiseError(err)
-					return otto.FalseValue()
-				}
-
-				if val, ok := g.AllowAccessPkgs[packageName]; ok {
-					//Package already registered by at least one module. Check if this script root registered
-					thisModuleRegistered := false
-					for _, registeredPkgInterface := range val {
-						if registeredPkgInterface.InitRoot == scriptRoot {
-							//This package registered this command. Allow access
-							thisModuleRegistered = true
-						}
-					}
-
-					if !thisModuleRegistered {
-						g.RaiseError(errors.New("Package request not registered: " + packageName))
-						return otto.FalseValue()
-					}
-
-				} else {
-					g.RaiseError(errors.New("Package request not registered: " + packageName))
-					return otto.FalseValue()
-				}
-
-				//Ok. Allow paramter to be loaded
-				execParamters, _ := call.Argument(1).ToString()
-
-				// Split input paramters into []string
-				r := csv.NewReader(strings.NewReader(execParamters))
-				r.Comma = ' ' // space
-				fields, err := r.Read()
-				if err != nil {
-					g.RaiseError(err)
-					return otto.FalseValue()
-				}
-
-				//Run os.Exec on the given commands
-				cmd := exec.Command(packageName, fields...)
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					log.Println(string(out))
-					g.RaiseError(err)
-					return otto.FalseValue()
-				}
-
-				reply, _ := vm.ToValue(string(out))
-				return reply
-			*/
 		})
 
 		//Include another js in runtime

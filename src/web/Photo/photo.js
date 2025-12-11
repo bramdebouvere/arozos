@@ -10,6 +10,15 @@ let photoList = [];
 let prePhoto = "";
 let nextPhoto = "";
 let currentModel = "";
+let isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+// Check if image should use compression (only JPG/PNG)
+function shouldUseCompression(filepath, filesize) {
+    const ext = filepath.split('.').pop().toLowerCase();
+    const isJpgOrPng = (ext === 'jpg' || ext === 'jpeg' || ext === 'png');
+    const COMPRESSION_THRESHOLD = 5 * 1024 * 1024; // 5MB
+    return isJpgOrPng && filesize && filesize > COMPRESSION_THRESHOLD;
+}
 
 // Get viewable image URL (handles RAW files)
 function getViewableImageUrl(filepath, callback) {
@@ -212,6 +221,7 @@ function closeViewer(){
 
     setTimeout(function(){
         $("#fullImage").attr("src","img/loading.png");
+        $("#compressedImage").attr("src","").hide().removeClass('hidden');
         $("#bg-image").attr("src","");
         $("#info-filename").text("");
         $("#info-filepath").text("");
@@ -236,6 +246,8 @@ function closeViewer(){
     }, 300);
 }
 
+let compressedImageLoaded = false;
+let fullsizeImageLoaded = false;
 
 function showImage(object){
     // Reset zoom level when switching photos
@@ -243,32 +255,102 @@ function showImage(object){
         resetZoom();
     }
 
+    if (!$(object).hasClass("imagecard")){
+        // Not an image card, do nothing
+        return;
+    }
+    
+    // Reset loading flags
+    compressedImageLoaded = false;
+    fullsizeImageLoaded = false;
+    
     var fd = JSON.parse(decodeURIComponent($(object).attr("filedata")));
+    $("#info-dimensions").text("Calculating...");
+    // Check if we should use compression (only for JPG/PNG > 5MB)
+    const useCompression = shouldUseCompression(fd.filepath, fd.filesize);
 
-    // Update image dimensions and generate histogram when loaded
-    $("#fullImage").off("load").on('load', function() {
-        let width = this.naturalWidth;
-        let height = this.naturalHeight;
-        $("#info-dimensions").text(width + ' × ' + height + "px");
-
-        // Wait for image to be ready, then generate histogram
-        const canvas = document.getElementById('histogram-canvas');
-        if (canvas) {
-            generateHistogram(document.getElementById('fullImage'), canvas);
-        }
-    });
-
+    // Set thumbnail as placeholder for full image
+    const thumbnailUrl = $(object).find('img').attr('src');
+    $("#fullImage").attr("src", thumbnailUrl);
+    $("#fullImage").hide();
+    $("#compressedImage").show();
+    $("#compressedImage").attr("src", thumbnailUrl);
+    $("#bg-image").attr("src", thumbnailUrl);
+    
     // Get image URL (backend handles RAW files automatically)
     getViewableImageUrl(fd.filepath, (imageUrl, isSupported, isBlob, method) => {
-        $("#fullImage").attr('src', imageUrl);
-        $("#bg-image").attr('src', imageUrl);
+        $("#loading-progress").show();
+        const compressedImg = document.getElementById('compressedImage');
+        const fullImg = document.getElementById('fullImage');
+        const bgImg = document.getElementById('bg-image');
+        $("#loading-progress").html(`<i class="loading spinner icon"></i> Loading`);
+        if (useCompression) {
+            // Use compressed version for large JPG/PNG files
+            console.log('Large JPG/PNG detected (' + (fd.filesize / 1024 / 1024).toFixed(2) + 'MB), loading compressed version first');
+
+            fetch(ao_root + "system/ajgi/interface?script=Photo/backend/getCompressedImg.js", {
+                method: 'POST',
+                cache: 'no-cache',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    "filepath": fd.filepath
+                })
+            }).then(resp => {
+                resp.text().then(dataURL => {
+                    $("#loading-progress").html(`<i class="loading spinner icon"></i> Optimizing Resolution`);
+                    compressedImageLoaded = true;
+
+                    // Only show compressed image if full-size hasn't loaded yet
+                    if (!fullsizeImageLoaded) {
+                        compressedImg.src = dataURL;
+                        compressedImg.style.display = 'block';
+                        bgImg.src = dataURL;
+                    } else {
+                        console.log('Full-size image already loaded, skipping compressed image display');
+                    }
+                });
+            }).catch(error => {
+                console.error('Failed to load compressed image:', error);
+                // Fall back to full size image
+                fullImg.src = imageUrl;
+                bgImg.src = imageUrl;
+            });
+
+            // Start loading full-size image in background
+            loadFullSizeImageInBackground(imageUrl, fd);
+        } else {
+            $("#compressedImage").hide();
+            $("#fullImage").show();
+            $("#loading-progress").hide();
+            // Use full image URL directly for RAW, WEBP, or small JPG/PNG files
+            if (method === 'backend_raw') {
+                console.log('RAW file: Rendered by backend');
+            }
+            fullImg.src = imageUrl;
+            bgImg.src = imageUrl;
+        }
+
+        // Update image dimensions and generate histogram when full image loads
+        $("#fullImage").off("load").on('load', function() {
+            fullsizeImageLoaded = true;
+            let width = this.naturalWidth;
+            let height = this.naturalHeight;
+            $("#info-dimensions").text(width + ' × ' + height + "px");
+
+            // Hide the compressed image once full image is loaded
+            $("#compressedImage").hide();
+            $("#fullImage").show();
+            $("#loading-progress").hide();
+            const canvas = document.getElementById('histogram-canvas');
+            if (canvas) {
+                generateHistogram(this, canvas);
+            }
+        });
+
         $("#info-filename").text(fd.filename);
         $("#info-filepath").text(fd.filepath);
-
-        // Log the rendering method used
-        if (method === 'backend_raw') {
-            console.log('RAW file: Rendered by backend');
-        }
 
         var nextCard = $(object).next();
         var prevCard = $(object).prev();
@@ -282,6 +364,11 @@ function showImage(object){
             prePhoto = prevCard[0];
         }else{
             prePhoto = null;
+        }
+
+        // Update navigation buttons state
+        if (typeof updateNavigationButtons === 'function') {
+            updateNavigationButtons();
         }
 
         ao_module_setWindowTitle("Photo - " + fd.filename);
@@ -307,6 +394,14 @@ function showImage(object){
             formatExifData({}, fd); // Call with empty EXIF to show tone analysis
         });
     });
+}
+
+
+// Function to load full-size image in background with progress tracking
+function loadFullSizeImageInBackground(fullSizeUrl, fileData) {
+    console.log('Starting background download of full-size image...');
+    const fullImage = document.getElementById('fullImage');
+    fullImage.src = fullSizeUrl;
 }
 
 $(document).on("keydown", function(e){
